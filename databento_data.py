@@ -87,8 +87,8 @@ FUTURES_ROOTS = {
     'ZF': 'ZF',   # 5-Year T-Note
     'ZT': 'ZT',   # 2-Year T-Note
     'ZQ': 'ZQ',   # 30-Day Fed Funds
-    'GE': 'GE',   # Eurodollar
-    'SR3': 'SR3', # 3-Month SOFR
+    # 'GE': 'GE',   # Eurodollar (DELISTED - replaced by SOFR)
+    'SR3': 'SR3', # 3-Month SOFR (replaced Eurodollar)
     'SR1': 'SR1', # 1-Month SOFR
     
     # ========== DAIRY ==========
@@ -106,8 +106,23 @@ FUTURES_ROOTS = {
 }
 
 # Databento datasets
-FUTURES_DATASET = 'GLBX.MDP3'  # CME/CBOT/NYMEX/COMEX futures
+CME_DATASET = 'GLBX.MDP3'      # CME/CBOT/NYMEX/COMEX futures
+ICE_DATASET = 'IFEU.IMPACT'    # ICE Europe futures (softs, energy)
 STOCKS_DATASET = 'XNAS.ITCH'   # NASDAQ stocks
+
+# ICE Futures (softs and other ICE products)
+# Maps: Databento symbol -> DB symbol
+# NOTE: ICE data requires separate Databento subscription (IFEU.IMPACT)
+# Uncomment below if you have access
+ICE_FUTURES_ROOTS = {
+    # ========== SOFTS (ICE) - DISABLED - requires IFEU.IMPACT access ==========
+    # 'KC': 'KC',   # Coffee C
+    # 'CC': 'CC',   # Cocoa
+    # 'SB': 'SB',   # Sugar #11
+    # 'CT': 'CT',   # Cotton #2
+    # 'OJ': 'OJ',   # Orange Juice (FCOJ-A)
+    # 'DX': 'DX',   # US Dollar Index
+}
 
 # Stock symbols to fetch (will be prefixed with STK in DB)
 # These go directly to continuous_prices (no roll needed)
@@ -183,7 +198,7 @@ def get_active_contracts(root: str, trade_date: date) -> list:
     return contracts
 
 
-def fetch_futures_data(client, roots: list, start: str, end: str) -> list:
+def fetch_futures_data(client, roots: list, start: str, end: str, dataset: str, dataset_name: str = "") -> list:
     """
     Fetch futures OHLCV data from Databento.
     Uses continuous front-month contracts (.c.0 suffix).
@@ -191,7 +206,8 @@ def fetch_futures_data(client, roots: list, start: str, end: str) -> list:
     if not roots:
         return []
     
-    print(f"Fetching futures data for roots: {roots}")
+    print(f"Fetching {dataset_name} futures for roots: {roots}")
+    print(f"  Dataset: {dataset}")
     print(f"  Date range: {start} to {end}")
     
     all_records = []
@@ -203,7 +219,7 @@ def fetch_futures_data(client, roots: list, start: str, end: str) -> list:
     try:
         # Fetch all continuous contracts in one request
         data = client.timeseries.get_range(
-            dataset=FUTURES_DATASET,
+            dataset=dataset,
             symbols=continuous_symbols,
             stype_in='continuous',
             schema='ohlcv-1d',
@@ -230,7 +246,7 @@ def fetch_futures_data(client, roots: list, start: str, end: str) -> list:
             try:
                 # Try with .FUT suffix
                 data = client.timeseries.get_range(
-                    dataset=FUTURES_DATASET,
+                    dataset=dataset,
                     symbols=[f"{root}.FUT"],
                     schema='ohlcv-1d',
                     start=start,
@@ -245,7 +261,7 @@ def fetch_futures_data(client, roots: list, start: str, end: str) -> list:
             except Exception as e2:
                 print(f"  {root}: Error - {str(e2)[:50]}")
     
-    print(f"  Total records: {len(all_records)}")
+    print(f"  Total {dataset_name} records: {len(all_records)}")
     return all_records
 
 
@@ -450,12 +466,14 @@ def run(start_date: date | None, end_date: date | None, dry_run: bool = False,
     fetch_futures = not stocks_only
     fetch_stocks = not futures_only and len(STOCK_SYMBOLS) > 0
     
+    total_futures = len(FUTURES_ROOTS) + len(ICE_FUTURES_ROOTS)
+    
     print("=" * 60)
     print("DATABENTO SEASONALITY DATA FETCHER")
     print("=" * 60)
     print(f"Date range: {start_str} to {end_str}")
     print(f"Dry run: {dry_run}")
-    print(f"Fetch futures: {fetch_futures} ({len(FUTURES_ROOTS)} symbols)")
+    print(f"Fetch futures: {fetch_futures} ({len(FUTURES_ROOTS)} CME + {len(ICE_FUTURES_ROOTS)} ICE = {total_futures} symbols)")
     print(f"Fetch stocks: {fetch_stocks} ({len(STOCK_SYMBOLS)} symbols)")
     
     # Initialize clients
@@ -465,31 +483,65 @@ def run(start_date: date | None, end_date: date | None, dry_run: bool = False,
     try:
         # ============ FUTURES ============
         if fetch_futures:
+            total_futures_inserted = 0
+            
+            # --- CME/CBOT/NYMEX/COMEX ---
             print("\n" + "=" * 60)
-            print("FUTURES → continuous_prices (using Databento continuous contracts)")
+            print("CME FUTURES → continuous_prices")
             print("=" * 60)
             
-            # Ensure futures assets exist
-            db_symbols = list(set(FUTURES_ROOTS.values()))
+            # Ensure CME futures assets exist
+            cme_db_symbols = list(set(FUTURES_ROOTS.values()))
             if not dry_run:
-                ensure_assets_exist(conn, db_symbols, "Futures")
+                ensure_assets_exist(conn, cme_db_symbols, "Futures")
             
-            # Fetch futures contract data
-            records = fetch_futures_data(
+            # Fetch CME futures
+            cme_records = fetch_futures_data(
                 client, 
                 list(FUTURES_ROOTS.keys()), 
                 start_str, 
-                end_str
+                end_str,
+                dataset=CME_DATASET,
+                dataset_name="CME"
             )
             
             if dry_run:
-                print(f"\n[DRY RUN] Would insert {len(records)} futures records")
-                if records:
-                    print("Sample futures record:")
-                    print(records[0])
-            elif records:
-                inserted = insert_futures_prices(conn, records, FUTURES_ROOTS)
-                print(f"\nInserted {inserted} records into continuous_prices")
+                print(f"\n[DRY RUN] Would insert {len(cme_records)} CME futures records")
+            elif cme_records:
+                inserted = insert_futures_prices(conn, cme_records, FUTURES_ROOTS)
+                total_futures_inserted += inserted
+                print(f"\nInserted {inserted} CME records into continuous_prices")
+            
+            # --- ICE (Softs) ---
+            if ICE_FUTURES_ROOTS:
+                print("\n" + "=" * 60)
+                print("ICE FUTURES (Softs) → continuous_prices")
+                print("=" * 60)
+                
+                # Ensure ICE futures assets exist
+                ice_db_symbols = list(set(ICE_FUTURES_ROOTS.values()))
+                if not dry_run:
+                    ensure_assets_exist(conn, ice_db_symbols, "Futures")
+                
+                # Fetch ICE futures
+                ice_records = fetch_futures_data(
+                    client, 
+                    list(ICE_FUTURES_ROOTS.keys()), 
+                    start_str, 
+                    end_str,
+                    dataset=ICE_DATASET,
+                    dataset_name="ICE"
+                )
+                
+                if dry_run:
+                    print(f"\n[DRY RUN] Would insert {len(ice_records)} ICE futures records")
+                elif ice_records:
+                    inserted = insert_futures_prices(conn, ice_records, ICE_FUTURES_ROOTS)
+                    total_futures_inserted += inserted
+                    print(f"\nInserted {inserted} ICE records into continuous_prices")
+            
+            if not dry_run:
+                print(f"\n>>> Total futures inserted: {total_futures_inserted}")
         
         # ============ STOCKS ============
         if fetch_stocks:

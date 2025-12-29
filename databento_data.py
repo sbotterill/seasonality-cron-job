@@ -25,6 +25,10 @@ from urllib.parse import urlparse
 import psycopg2
 from psycopg2.extras import execute_values
 import databento as db
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
 
 # ------------ CONFIG ------------
 SCHEMA_NAME = "seasonality"
@@ -32,29 +36,73 @@ SCHEMA_NAME = "seasonality"
 # Futures root symbols to fetch
 # Maps: Databento root -> DB symbol
 FUTURES_ROOTS = {
-    # Indices
+    # ========== INDICES ==========
     'ES': 'ES',   # E-mini S&P 500
     'NQ': 'NQ',   # E-mini Nasdaq
-    # Energy  
-    'CL': 'CL',   # Crude Oil
+    'YM': 'YM',   # Mini Dow
+    'RTY': 'RTY', # E-mini Russell 2000
+    
+    # ========== ENERGY ==========
+    'CL': 'CL',   # Crude Oil WTI
     'NG': 'NG',   # Natural Gas
-    # Metals
+    'RB': 'RB',   # RBOB Gasoline
+    'HO': 'HO',   # Heating Oil
+    
+    # ========== METALS ==========
     'GC': 'GC',   # Gold
     'SI': 'SI',   # Silver
     'HG': 'HG',   # Copper
-    # Grains
+    'PL': 'PL',   # Platinum
+    'PA': 'PA',   # Palladium
+    'ALI': 'ALI', # Aluminum
+    
+    # ========== GRAINS ==========
     'ZC': 'ZC',   # Corn
     'ZS': 'ZS',   # Soybeans
-    'ZW': 'ZW',   # Wheat
-    'ZM': 'SM',   # Soybean Meal (DB uses SM)
-    'ZL': 'BO',   # Soybean Oil (DB uses BO)
-    # Meats
-    'LE': 'LC',   # Live Cattle (DB uses LC)
-    'HE': 'LH',   # Lean Hogs (DB uses LH)
-    'GF': 'FC',   # Feeder Cattle
-    # Currencies
+    'ZW': 'ZW',   # Wheat (Chicago)
+    'KE': 'KE',   # KC Wheat
+    'ZM': 'ZM',   # Soybean Meal
+    'ZL': 'ZL',   # Soybean Oil
+    'ZO': 'ZO',   # Oats
+    'ZR': 'ZR',   # Rough Rice
+    
+    # ========== MEATS ==========
+    'LE': 'LE',   # Live Cattle
+    'HE': 'HE',   # Lean Hogs
+    'GF': 'GF',   # Feeder Cattle
+    
+    # ========== CURRENCIES ==========
     '6E': '6E',   # Euro FX
     '6J': '6J',   # Japanese Yen
+    '6A': '6A',   # Australian Dollar
+    '6B': '6B',   # British Pound
+    '6C': '6C',   # Canadian Dollar
+    '6S': '6S',   # Swiss Franc
+    '6N': '6N',   # New Zealand Dollar
+    '6M': '6M',   # Mexican Peso
+    
+    # ========== TREASURIES / RATES ==========
+    'ZB': 'ZB',   # 30-Year T-Bond
+    'ZN': 'ZN',   # 10-Year T-Note
+    'ZF': 'ZF',   # 5-Year T-Note
+    'ZT': 'ZT',   # 2-Year T-Note
+    'ZQ': 'ZQ',   # 30-Day Fed Funds
+    'GE': 'GE',   # Eurodollar
+    'SR3': 'SR3', # 3-Month SOFR
+    'SR1': 'SR1', # 1-Month SOFR
+    
+    # ========== DAIRY ==========
+    'DC': 'DC',   # Class III Milk
+    'GNF': 'GNF', # Non-Fat Dry Milk
+    'CB': 'CB',   # Cash-Settled Butter
+    'CSC': 'CSC', # Cash-Settled Cheese
+    
+    # ========== CRYPTO (CME) ==========
+    'BTC': 'BTC', # Bitcoin
+    'ETH': 'ETH', # Ethereum
+    
+    # ========== LUMBER ==========
+    'LBR': 'LBR', # Lumber
 }
 
 # Databento datasets
@@ -67,7 +115,7 @@ STOCK_SYMBOLS = [
     # Major indices ETFs
     'SPY', 'QQQ', 'IWM', 'DIA',
     # Mega caps
-    'AAPL', 'MSFT', 'GOOGL', 'AMZN', 'NVDA', 'META', 'TSLA', 'BRK.B',
+    'AAPL', 'MSFT', 'GOOGL', 'AMZN', 'NVDA', 'META', 'TSLA', 'BRKB',
     # Tech
     'AMD', 'INTC', 'CRM', 'ORCL', 'ADBE', 'CSCO', 'AVGO', 'TXN',
     # Finance
@@ -138,7 +186,7 @@ def get_active_contracts(root: str, trade_date: date) -> list:
 def fetch_futures_data(client, roots: list, start: str, end: str) -> list:
     """
     Fetch futures OHLCV data from Databento.
-    Uses 'parent' symbol type to get all active contracts for each root.
+    Uses continuous front-month contracts (.c.0 suffix).
     """
     if not roots:
         return []
@@ -146,38 +194,65 @@ def fetch_futures_data(client, roots: list, start: str, end: str) -> list:
     print(f"Fetching futures data for roots: {roots}")
     print(f"  Date range: {start} to {end}")
     
-    # Use 'parent' stype to get all contracts for each root
-    # Or we can request specific contracts
     all_records = []
     
-    for root in roots:
-        try:
-            # Request all contracts for this root using parent symbology
-            data = client.timeseries.get_range(
-                dataset=FUTURES_DATASET,
-                symbols=[root],
-                stype_in='parent',  # Get all child contracts
-                schema='ohlcv-1d',
-                start=start,
-                end=end,
-            )
-            df = data.to_df()
-            if len(df) > 0:
-                df['root'] = root
-                records = df.reset_index().to_dict('records')
-                all_records.extend(records)
-                print(f"  {root}: {len(records)} records")
-        except Exception as e:
-            print(f"  {root}: Error - {str(e)[:60]}")
+    # Build continuous contract symbols (e.g., ES.c.0 for front month)
+    # Databento uses .c.0 for front month, .c.1 for second month, etc.
+    continuous_symbols = [f"{root}.c.0" for root in roots]
+    
+    try:
+        # Fetch all continuous contracts in one request
+        data = client.timeseries.get_range(
+            dataset=FUTURES_DATASET,
+            symbols=continuous_symbols,
+            stype_in='continuous',
+            schema='ohlcv-1d',
+            start=start,
+            end=end,
+        )
+        df = data.to_df()
+        if len(df) > 0:
+            # Extract root from symbol (ES.c.0 -> ES)
+            df['root'] = df['symbol'].apply(lambda x: x.split('.')[0] if '.' in str(x) else x)
+            records = df.reset_index().to_dict('records')
+            all_records.extend(records)
+            
+            # Print per-symbol counts
+            symbol_counts = df.groupby('root').size()
+            for root, count in symbol_counts.items():
+                print(f"  {root}: {count} records")
+    except Exception as e:
+        print(f"  Error fetching continuous: {str(e)[:80]}")
+        
+        # Fallback: try individual symbols with raw_symbol
+        print("  Trying individual symbol fetch...")
+        for root in roots:
+            try:
+                # Try with .FUT suffix
+                data = client.timeseries.get_range(
+                    dataset=FUTURES_DATASET,
+                    symbols=[f"{root}.FUT"],
+                    schema='ohlcv-1d',
+                    start=start,
+                    end=end,
+                )
+                df = data.to_df()
+                if len(df) > 0:
+                    df['root'] = root
+                    records = df.reset_index().to_dict('records')
+                    all_records.extend(records)
+                    print(f"  {root}: {len(records)} records")
+            except Exception as e2:
+                print(f"  {root}: Error - {str(e2)[:50]}")
     
     print(f"  Total records: {len(all_records)}")
     return all_records
 
 
-def insert_historical_data(conn, records: list, root_to_db: dict) -> int:
+def insert_futures_prices(conn, records: list, root_to_db: dict) -> int:
     """
-    Insert price records into historical_data table.
-    This table is used by build_continuous_prices to create the rolled series.
+    Insert futures price records directly into continuous_prices table.
+    Since we're using Databento's continuous contracts, they're already rolled.
     """
     if not records:
         return 0
@@ -189,9 +264,6 @@ def insert_historical_data(conn, records: list, root_to_db: dict) -> int:
         
         if not db_symbol:
             continue
-        
-        # Get contract symbol (e.g., ESH25)
-        contract = rec.get('symbol', '')
         
         # Extract date from ts_event
         ts_event = rec.get('ts_event')
@@ -208,40 +280,35 @@ def insert_historical_data(conn, records: list, root_to_db: dict) -> int:
         high_px = float(rec.get('high', 0))
         low_px = float(rec.get('low', 0))
         close_px = float(rec.get('close', 0))
-        volume = int(rec.get('volume', 0))
         
         # Skip invalid prices
         if close_px <= 0:
             continue
         
         rows.append((
-            db_symbol,      # symbol
-            trade_date,     # trade_date
-            open_px,        # open
-            high_px,        # high
-            low_px,         # low
-            close_px,       # close
-            volume,         # value (volume for roll detection)
-            contract,       # contract code
-            None,           # instrument_id (optional)
+            trade_date,
+            db_symbol,
+            open_px,
+            high_px,
+            low_px,
+            close_px,
         ))
     
     if not rows:
         return 0
     
     with conn.cursor() as cur:
-        # Insert into historical_data
-        # Uses contract_norm for conflict detection (computed column)
+        # Insert directly into continuous_prices
+        # Databento's continuous contracts are already rolled
         execute_values(cur, f"""
-            INSERT INTO {SCHEMA_NAME}.historical_data 
-                (symbol, trade_date, open, high, low, close, value, contract, instrument_id)
+            INSERT INTO {SCHEMA_NAME}.continuous_prices 
+                (trade_date, symbol, open, high, low, close)
             VALUES %s
-            ON CONFLICT (symbol, trade_date, contract_norm) DO UPDATE SET
+            ON CONFLICT (trade_date, symbol) DO UPDATE SET
                 open = EXCLUDED.open,
                 high = EXCLUDED.high,
                 low = EXCLUDED.low,
-                close = EXCLUDED.close,
-                value = EXCLUDED.value
+                close = EXCLUDED.close
         """, rows, page_size=1000)
     
     conn.commit()
@@ -263,6 +330,7 @@ def ensure_assets_exist(conn, symbols: list, asset_type: str = "Futures"):
 def fetch_stock_data(client, symbols: list, start: str, end: str) -> list:
     """
     Fetch stock OHLCV data from Databento.
+    Only uses ohlcv-1d schema (daily bars).
     """
     if not symbols:
         return []
@@ -273,7 +341,7 @@ def fetch_stock_data(client, symbols: list, start: str, end: str) -> list:
     all_records = []
     
     # Fetch in batches to avoid timeout
-    batch_size = 50
+    batch_size = 20
     for i in range(0, len(symbols), batch_size):
         batch = symbols[i:i + batch_size]
         try:
@@ -288,9 +356,15 @@ def fetch_stock_data(client, symbols: list, start: str, end: str) -> list:
             if len(df) > 0:
                 records = df.reset_index().to_dict('records')
                 all_records.extend(records)
-                print(f"  Batch {i//batch_size + 1}: {len(records)} records")
+                print(f"  Batch {i//batch_size + 1}: {len(records)} OHLCV records")
         except Exception as e:
-            print(f"  Batch {i//batch_size + 1} error: {str(e)[:60]}")
+            error_msg = str(e)
+            if 'not_fully_available' in error_msg or 'not available' in error_msg.lower():
+                print(f"  Batch {i//batch_size + 1}: ohlcv-1d not available for these dates")
+                print(f"  Note: Stock OHLCV may require different subscription or dataset")
+                break
+            else:
+                print(f"  Batch {i//batch_size + 1} error: {error_msg[:60]}")
     
     print(f"  Total stock records: {len(all_records)}")
     return all_records
@@ -392,7 +466,7 @@ def run(start_date: date | None, end_date: date | None, dry_run: bool = False,
         # ============ FUTURES ============
         if fetch_futures:
             print("\n" + "=" * 60)
-            print("FUTURES → historical_data (for volume-based roll)")
+            print("FUTURES → continuous_prices (using Databento continuous contracts)")
             print("=" * 60)
             
             # Ensure futures assets exist
@@ -414,8 +488,8 @@ def run(start_date: date | None, end_date: date | None, dry_run: bool = False,
                     print("Sample futures record:")
                     print(records[0])
             elif records:
-                inserted = insert_historical_data(conn, records, FUTURES_ROOTS)
-                print(f"\nInserted {inserted} records into historical_data")
+                inserted = insert_futures_prices(conn, records, FUTURES_ROOTS)
+                print(f"\nInserted {inserted} records into continuous_prices")
         
         # ============ STOCKS ============
         if fetch_stocks:
@@ -443,8 +517,7 @@ def run(start_date: date | None, end_date: date | None, dry_run: bool = False,
         print("\n" + "=" * 60)
         print("COMPLETE")
         print("=" * 60)
-        if fetch_futures:
-            print("\nNext step: Run build_continuous_prices.py to roll futures contracts")
+        print("\nData inserted directly into continuous_prices table.")
         
     finally:
         conn.close()

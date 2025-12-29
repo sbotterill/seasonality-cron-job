@@ -3,12 +3,16 @@
 Test script to check Databento API access and estimate costs.
 NO DATA IS FETCHED - only cost estimates.
 
-Requires: pip install databento
-Set env var: DATABENTO_API_KEY=your_key
+Requires: pip install databento python-dotenv
+Reads from .env file or environment variable: DATABENTO_API_KEY
 """
 import os
 import databento as db
 from datetime import datetime, timedelta
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
 
 # Make sure API key is set
 api_key = os.getenv('DATABENTO_API_KEY')

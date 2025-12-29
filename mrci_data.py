@@ -11,7 +11,7 @@ from playwright.sync_api import sync_playwright
 # ------------ DB CONFIG ------------
 db_url = urlparse(
     "postgresql://cotsui_db_user:dl2KHaaSiR0h7fQvmRdBNEsk9aukwJS6@"
-    "dpg-d10qrb15pdvs73ae8ba0-a.oregon-postgres.render.com/cotsui_db"
+    "dpg-d57mi72li9vc739j4ckg-a.oregon-postgres.render.com/cotsui_db_6605"
 )
 SCHEMA_NAME = "seasonality"
 

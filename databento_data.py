@@ -108,7 +108,7 @@ FUTURES_ROOTS = {
 # Databento datasets
 CME_DATASET = 'GLBX.MDP3'      # CME/CBOT/NYMEX/COMEX futures
 ICE_DATASET = 'IFEU.IMPACT'    # ICE Europe futures (softs, energy)
-STOCKS_DATASET = 'XNAS.ITCH'   # NASDAQ stocks
+STOCKS_DATASET = 'DBEQ.BASIC'  # Databento equities - supports ohlcv-1d!
 
 # ICE Futures (softs and other ICE products)
 # Maps: Databento symbol -> DB symbol
@@ -273,7 +273,8 @@ def insert_futures_prices(conn, records: list, root_to_db: dict) -> int:
     if not records:
         return 0
     
-    rows = []
+    # Use dict to deduplicate by (trade_date, symbol) - last one wins
+    rows_dict = {}
     for rec in records:
         root = rec.get('root', '')
         db_symbol = root_to_db.get(root)
@@ -301,14 +302,18 @@ def insert_futures_prices(conn, records: list, root_to_db: dict) -> int:
         if close_px <= 0:
             continue
         
-        rows.append((
+        # Deduplicate: use (trade_date, symbol) as key
+        key = (trade_date, db_symbol)
+        rows_dict[key] = (
             trade_date,
             db_symbol,
             open_px,
             high_px,
             low_px,
             close_px,
-        ))
+        )
+    
+    rows = list(rows_dict.values())
     
     if not rows:
         return 0
@@ -394,7 +399,8 @@ def insert_stock_prices(conn, records: list) -> int:
     if not records:
         return 0
     
-    rows = []
+    # Use dict to deduplicate by (trade_date, symbol) - last one wins
+    rows_dict = {}
     for rec in records:
         # Get stock symbol and prefix with STK
         raw_symbol = rec.get('symbol', '')
@@ -421,14 +427,18 @@ def insert_stock_prices(conn, records: list) -> int:
         if close_px <= 0:
             continue
         
-        rows.append((
+        # Deduplicate: use (trade_date, symbol) as key
+        key = (trade_date, db_symbol)
+        rows_dict[key] = (
             trade_date,
             db_symbol,
             open_px,
             high_px,
             low_px,
             close_px,
-        ))
+        )
+    
+    rows = list(rows_dict.values())
     
     if not rows:
         return 0
@@ -454,9 +464,10 @@ def run(start_date: date | None, end_date: date | None, dry_run: bool = False,
         futures_only: bool = False, stocks_only: bool = False):
     """Main data fetching routine."""
     
-    # Default to last 7 days if no dates specified
+    # Default to T-2 (2 days ago) to account for data availability delay
+    # DBEQ.BASIC (stocks) typically has 1-2 day delay
     if not end_date:
-        end_date = date.today()
+        end_date = date.today() - timedelta(days=2)
     if not start_date:
         start_date = end_date - timedelta(days=7)
     
